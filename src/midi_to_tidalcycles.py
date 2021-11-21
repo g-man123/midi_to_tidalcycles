@@ -8,13 +8,16 @@ import argparse
 def midinote_to_note_name(midi_note):
     if midi_note == 0.0:
         return "~"
-    midi_note = int(midi_note)
-    note_names_array = ["c", "cs", "d", "ds", "e", "f", "fs", "g", "gs", "a", "as", "b"]
-    q, r = divmod(midi_note, 12) 
-    note_name = note_names_array[r]
-    octave_name = q  # q - 1  <- this is correct but tidal is off by an octave I think.
-    full_note_name = str(note_name) + str(octave_name)
-    return full_note_name
+    elif midi_note == 99999:
+        return 0
+    midi_note = int(midi_note) # 1 - 127
+    # note_names_array = ["c", "cs", "d", "ds", "e", "f", "fs", "g", "gs", "a", "as", "b"]
+    # q, r = divmod(midi_note, 12) 
+    # note_name = note_names_array[r]
+    # octave_name = q  # q - 1  <- this is correct but tidal is off by an octave I think.
+    # full_note_name = str(note_name) + str(octave_name)
+    # return full_note_name
+    return midi_note
 
 
 def infer_polyphony(midi_pattern):
@@ -29,9 +32,13 @@ def infer_polyphony(midi_pattern):
         elif type(event) == midi.events.NoteOffEvent:
             n_adjacent_on_events = 0
     return inferred_polyphony
-   
-     
-def midi_to_array(filename, quanta_per_qn = 4, velocity_on = False, legato_on = False, print_events = False, debug = False, hide = False):
+
+def find_notes(midi_pattern):
+    notes = [x.pitch for x in midi_pattern if type(x) == midi.events.NoteOnEvent or type(x) == midi.events.NoteOffEvent]
+    notes = sorted(list(dict.fromkeys(notes)))
+    return(len(notes), notes)
+
+def midi_to_array2(filename, quanta_per_qn = 4, velocity_on = False, legato_on = False, print_events = False, debug = False, hide = False, polyphonic_mode = False, show_pitch = False):
     pattern = midi.read_midifile(filename)
     ticks_per_quanta = pattern.resolution/quanta_per_qn  # = ticks per quarter note * quarter note per quanta
     last_event = pattern[-1][-1]
@@ -42,18 +49,24 @@ def midi_to_array(filename, quanta_per_qn = 4, velocity_on = False, legato_on = 
     # this int() is just for type matching in python 3 and shouldn't be rounding anything-- 
     # n_quanta should already be an int.
     n_quanta = int(cum_ticks/ticks_per_quanta)
+    n_notes, notes_list = find_notes(pattern[-1])
     polyphony = infer_polyphony(pattern)
-    if not hide:
+    if polyphonic_mode:
+        n_lines = polyphony
+    else:
+        n_lines = n_notes
+    if not hide and polyphony and polyphonic_mode:
         print("inferred polyphony is ", end = "")
         print(polyphony)
-    note_vector = np.zeros((n_quanta, polyphony)) 
+    note_vector = np.zeros((n_quanta, n_lines))
     if velocity_on:
-        velocity_vector = np.zeros((n_quanta, polyphony))
+        velocity_vector = np.zeros((n_quanta, n_lines))
     if legato_on:
-        legato_vector = np.zeros((n_quanta, polyphony))
+        legato_vector = np.zeros((n_quanta, n_lines))
         currently_active_notes = {} 
     cum_ticks = 0
     voice = -1 
+    
     for event in pattern[-1]:
         if print_events or debug:
             print(event)
@@ -61,16 +74,31 @@ def midi_to_array(filename, quanta_per_qn = 4, velocity_on = False, legato_on = 
         if type(event) == midi.events.NoteOnEvent:
             voice += 1
             quanta_index = int(cum_ticks/ticks_per_quanta)
+            note_index = notes_list.index(event.pitch)
             if debug:
                 print("voice number ", end = "")
                 print(voice)
                 print("quanta number ", end = "")
                 print(quanta_index)
-            note_vector[quanta_index,voice] = event.pitch
-            if legato_on: 
-                currently_active_notes[event.pitch] = [quanta_index, voice]
+            if polyphonic_mode:
+                note_vector[quanta_index,voice] = event.pitch
+            elif show_pitch:
+                note_vector[quanta_index,note_index] = event.pitch
+            else:
+                if note_index == 0:
+                    note_vector[quanta_index,note_index] = 99999
+                else:
+                    note_vector[quanta_index,note_index] = note_index
+            if legato_on:
+                if polyphonic_mode:
+                    currently_active_notes[event.pitch] = [quanta_index, voice]
+                else:
+                    currently_active_notes[event.pitch] = [quanta_index, note_index]
             if velocity_on:
-                velocity_vector[quanta_index,voice] = event.velocity
+                if polyphonic_mode:
+                    velocity_vector[quanta_index,voice] = event.velocity
+                else:
+                    velocity_vector[quanta_index,note_index] = event.velocity
         elif (type(event) == midi.events.NoteOffEvent) & (legato_on):
             quanta_note_off_index = int(cum_ticks/ticks_per_quanta)
             note_length = quanta_note_off_index - currently_active_notes[event.pitch][0]
@@ -80,10 +108,17 @@ def midi_to_array(filename, quanta_per_qn = 4, velocity_on = False, legato_on = 
         else: # end of track
             # turn all notes off
             quanta_note_off_index = int(cum_ticks/ticks_per_quanta)
+            try:
+                note_index = notes_list.index(event.pitch)
+            except:
+                pass
             if legato_on:
                 for key in currently_active_notes.keys():
                     note_length = quanta_note_off_index - currently_active_notes[key][0]
-                    legato_vector[currently_active_notes[key],voice] = note_length
+                    if polyphonic_mode:
+                        legato_vector[currently_active_notes[key],voice] = note_length
+                    else:
+                        legato_vector[currently_active_notes[key],note_index] = note_length
             voice = -1
     if not legato_on and velocity_on:
         return note_vector, velocity_vector
@@ -96,6 +131,9 @@ def midi_to_array(filename, quanta_per_qn = 4, velocity_on = False, legato_on = 
 
     else:
         return note_vector
+
+
+
 
 
 def vel_to_amp(vel):
@@ -136,20 +174,23 @@ def simplify_repeats(list_pattern):
     return output_list
 
 
-def print_midi_stack(notes, vels = None, legatos = None, consolidate = None):
-    n_voices = len(notes[0,:])
+def print_midi_stack(notes, vels = None, legatos = None, consolidate = None, tab = None):
+    n_lines = len(notes[0,:])
     # determine whether a stack is needed and create a control boolean
-    add_stack = (n_voices != 1) | (vels is not None) | (legatos is not None)
+    add_stack = (n_lines != 1) | (vels is not None) | (legatos is not None)
     if add_stack:
         print("stack [")
-    # iterate over voices
-    for j in range(0,n_voices):
+    # iterate over lines
+    for j in range(0,n_lines):
         notes_names  = [midinote_to_note_name(x) for x in notes[:,j]]
         if consolidate:
             notes_names = simplify_repeats(notes_names)
-        print("    n \"", end = "")
+        if tab:
+            print("    n \"", end = "")
+        else:
+            print("\"", end = "")
         print(*notes_names, sep=' ', end = "")
-        if (legatos is None) & (vels is None) & (j != n_voices - 1): # add a quote and a comma if there are more voices in the stack
+        if (legatos is None) & (vels is None) & (j != n_lines - 1): # add a quote and a comma if there are more voices in the stack
             print("\",")  
         else:
             print("\"") # else this is the last voice, so close the quotes
@@ -171,6 +212,7 @@ def print_midi_stack(notes, vels = None, legatos = None, consolidate = None):
         if legatos is not None:
             print("    # legato \"", end = "")
             note_legatos  = [x for x in legatos[:,j]]
+            # note_legatos  = [midinote_to_note_name(x) for x in legatos[:,j]]
             if consolidate:
                 note_legatos = simplify_repeats(note_legatos)
             print(*note_legatos, sep=' ', end = "")
@@ -180,8 +222,8 @@ def print_midi_stack(notes, vels = None, legatos = None, consolidate = None):
             # otherwise close the stack
             else:
                 print("\"\n]")
-        if (legatos is None) & (vels is None) & (j == n_voices - 1) & (add_stack):
-            print("]")  
+        if (legatos is None) & (vels is None) & (j == n_lines - 1) & (add_stack):
+            print("]")
 
 
 
@@ -198,11 +240,14 @@ if __name__ == "__main__":
     parser.add_argument("--amp","-a", const = True, default = False, help = "print amplitude pattern", action = 'store_const')
     parser.add_argument("--consolidate","-c", const = True, default = False, help = "consolidate repeated notes and values with '!' notation", action = 'store_const')
     parser.add_argument("--hide","-H", const = True, default = False, help = "hide printing name of midi file and inferred polyphony", action = 'store_const')
+    parser.add_argument("--tab","-t", const = True, default = False, help = "add tabs to start of each line", action = 'store_const')
+    parser.add_argument("--polyphony","-p", const = True, default = False, help = "polyphonic style of transcript", action = 'store_const')
+    parser.add_argument("--pitch","-pi", const = True, default = False, help = "show pitch in transcript", action = 'store_const')
     args = parser.parse_args()
     for midi_file in args.midi_files:
          if not args.hide:
              print(midi_file)
-         data = midi_to_array(midi_file, quanta_per_qn = args.resolution, velocity_on = args.amp, legato_on = args.legato, print_events = args.events, debug = args.debug, hide = args.hide)
+         data = midi_to_array2(midi_file, quanta_per_qn = args.resolution, velocity_on = args.amp, legato_on = args.legato, print_events = args.events, debug = args.debug, hide = args.hide, polyphonic_mode = args.polyphony, show_pitch = args.pitch)
          vels = None
          legatos = None
          consolidate = None
@@ -223,4 +268,4 @@ if __name__ == "__main__":
          # syncs tempo across all midis!
          slow_cmd = "slow (" + str(notes.shape[0]/args.resolution) + "/4) $ "
          print(slow_cmd, end = "")
-         print_midi_stack(notes, vels, legatos, consolidate = args.consolidate)
+         print_midi_stack(notes, vels, legatos, consolidate = args.consolidate, tab = args.tab)
